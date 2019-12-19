@@ -62,6 +62,13 @@ type SSOServer struct {
 func (s *SSOServer) makeHostCert(w http.ResponseWriter, h string) {
 	var certToReturn []byte
 	var kt string
+	var earlyFailError = errors.New("fail now please")
+
+	if len(h) == 0 {
+		log.Printf("No hostname specified: %s", h)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 
 	// Derived from ssh.common.supportedHostKeyAlgos with certificate host key types removed
 	var supportedHostKeyAlgos = []string{
@@ -93,13 +100,13 @@ func (s *SSOServer) makeHostCert(w http.ResponseWriter, h string) {
 			log.Printf("Issued host certificate for %s valid until %s.\n", h, nva.Format(time.RFC3339))
 
 			certToReturn = cert
-			return errors.New("fail now please")
+			return earlyFailError
 		},
 	})
-	if err != nil {
+	if err != nil  {
 		log.Printf("Error SSH connecting to hostname %s on port %d: %s ", h, s.Config.SshConnectForPublickeyPort, err)
-		w.WriteHeader(http.StatusBadRequest)
-		return
+		//w.WriteHeader(http.StatusBadRequest)
+		//return
 	}
 	// Ignore error code for above, as we'll definitely fail due to no creds
 	if len(certToReturn) == 0 {
