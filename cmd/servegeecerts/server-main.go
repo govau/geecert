@@ -48,6 +48,8 @@ import (
 	"net/http"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/go-http-utils/logger"
 )
 
 type SSOServer struct {
@@ -65,7 +67,7 @@ func (s *SSOServer) makeHostCert(w http.ResponseWriter, h string) {
 	var supportedHostKeyAlgos = []string{
 		ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521, ssh.KeyAlgoRSA, ssh.KeyAlgoDSA, ssh.KeyAlgoED25519,
 	}
-	ssh.Dial("tcp", fmt.Sprintf("%s:%d", h, s.Config.SshConnectForPublickeyPort), &ssh.ClientConfig{
+	_, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", h, s.Config.SshConnectForPublickeyPort), &ssh.ClientConfig{
 		User: "ca",
 		Auth: []ssh.AuthMethod{
 			ssh.Password("wrongpassignoreme"),
@@ -77,11 +79,13 @@ func (s *SSOServer) makeHostCert(w http.ResponseWriter, h string) {
 			}
 			caKey, err := LoadPrivateKeyFromPEM(s.Config.CaKeyPath)
 			if err != nil {
+				log.Printf("Error LoadPrivateKeyFromPEM for hostname %s: ", h, err)
 				return err
 			}
 
 			cert, nva, err := CreateHostCertificate(h, key, caKey, time.Duration(s.Config.GenerateCertDurationSeconds)*time.Second)
 			if err != nil {
+				log.Printf("Error CreateHostCertificate for hostname %s: ", h, err)
 				return err
 			}
 			kt = key.Type()
@@ -92,9 +96,14 @@ func (s *SSOServer) makeHostCert(w http.ResponseWriter, h string) {
 			return errors.New("fail now please")
 		},
 	})
-
+	if err != nil {
+		log.Printf("Error SSH connecting to hostname %s on port %d: %s ", h, s.Config.SshConnectForPublickeyPort, err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 	// Ignore error code for above, as we'll definitely fail due to no creds
 	if len(certToReturn) == 0 {
+		log.Printf("Error using SSH to retrieve certificate for hostname: %s", h)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -107,6 +116,7 @@ func (s *SSOServer) issueHostCertificate(w http.ResponseWriter, r *http.Request)
 	for _, m := range s.Config.AllowedHosts {
 		matched, err := filepath.Match(m, h)
 		if err != nil {
+			log.Printf("Error matching hostname: %s", h)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -115,17 +125,20 @@ func (s *SSOServer) issueHostCertificate(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+	log.Printf("Did not match hostname: %s", h)
 	w.WriteHeader(http.StatusBadRequest)
 	return
 }
 
 func (s *SSOServer) StartHTTP() {
-	http.HandleFunc("/hostCertificate", s.issueHostCertificate)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/hostCertificate", s.issueHostCertificate)
 	var err error
 	if s.Config.HostSigningTlsPath == "" { // http
-		err = http.ListenAndServe(fmt.Sprintf(":%d", s.Config.HttpListenPort), nil)
+		err = http.ListenAndServe(fmt.Sprintf(":%d", s.Config.HttpListenPort), logger.Handler(mux, os.Stdout, logger.CommonLoggerType))
 	} else {
-		err = http.ListenAndServeTLS(fmt.Sprintf(":%d", s.Config.HttpListenPort), s.Config.HostSigningTlsPath, s.Config.HostSigningTlsPath, nil)
+		err = http.ListenAndServeTLS(fmt.Sprintf(":%d", s.Config.HttpListenPort), s.Config.HostSigningTlsPath, s.Config.HostSigningTlsPath, logger.Handler(mux, os.Stdout, logger.CommonLoggerType))
 	}
 	if err != nil {
 		log.Printf("Error starting HTTP server: %s", err)

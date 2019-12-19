@@ -10,6 +10,14 @@
   version = "v3.2.0"
 
 [[projects]]
+  branch = "master"
+  digest = "1:3830db69d1ddb5974fee06b6f657b2084de719a6b345aa24e6e84c8ab74f4838"
+  name = "github.com/go-http-utils/logger"
+  packages = ["."]
+  pruneopts = "UT"
+  revision = "f3a42dcdeae6e445c9e986b7fda289d98db10414"
+
+[[projects]]
   digest = "1:239c4c7fd2159585454003d9be7207167970194216193a8a210b8d29576f19c9"
   name = "github.com/golang/protobuf"
   packages = [
@@ -170,6 +178,7 @@
   analyzer-version = 1
   input-imports = [
     "github.com/dgrijalva/jwt-go",
+    "github.com/go-http-utils/logger",
     "github.com/golang/protobuf/proto",
     "github.com/hydrogen18/stoppableListener",
     "github.com/mitchellh/go-homedir",
