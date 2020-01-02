@@ -21,10 +21,9 @@ package main
 import (
 	"encoding/base64"
 	"encoding/pem"
-	"errors"
 	"fmt"
+	"github.com/pkg/errors"
 	"io/ioutil"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -49,7 +48,11 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/go-http-utils/logger"
+	"github.com/dmksnnk/sentryhook"
+	"github.com/getsentry/raven-go"
+	"github.com/meatballhat/negroni-logrus"
+	log "github.com/sirupsen/logrus"
+	"github.com/urfave/negroni"
 )
 
 type SSOServer struct {
@@ -91,7 +94,7 @@ func (s *SSOServer) makeHostCert(w http.ResponseWriter, h string) {
 			}
 
 			cert, nva, err := CreateHostCertificate(h, key, caKey, time.Duration(s.Config.GenerateCertDurationSeconds)*time.Second)
-			if err != nil {
+			if err != nil || cert == nil {
 				log.Printf("Error CreateHostCertificate for hostname %s: ", h, err)
 				return err
 			}
@@ -103,10 +106,10 @@ func (s *SSOServer) makeHostCert(w http.ResponseWriter, h string) {
 			return earlyFailError
 		},
 	})
-	if err != nil  {
+	if err != nil && !strings.Contains(err.Error(), "fail now please") {
 		log.Printf("Error SSH connecting to hostname %s on port %d: %s ", h, s.Config.SshConnectForPublickeyPort, err)
-		//w.WriteHeader(http.StatusBadRequest)
-		//return
+		w.WriteHeader(http.StatusBadRequest)
+		return
 	}
 	// Ignore error code for above, as we'll definitely fail due to no creds
 	if len(certToReturn) == 0 {
@@ -140,16 +143,20 @@ func (s *SSOServer) issueHostCertificate(w http.ResponseWriter, r *http.Request)
 func (s *SSOServer) StartHTTP() {
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/hostCertificate", s.issueHostCertificate)
+	mux.HandleFunc("/hostCertificate", raven.RecoveryHandler(s.issueHostCertificate))
 	var err error
 	if s.Config.HostSigningTlsPath == "" { // http
-		err = http.ListenAndServe(fmt.Sprintf(":%d", s.Config.HttpListenPort), logger.Handler(mux, os.Stdout, logger.CommonLoggerType))
+		n := negroni.New()
+		n.Use(negronilogrus.NewMiddleware())
+		n.UseHandler(mux)
+		n.Run(fmt.Sprintf(":%d", s.Config.HttpListenPort))
 	} else {
-		err = http.ListenAndServeTLS(fmt.Sprintf(":%d", s.Config.HttpListenPort), s.Config.HostSigningTlsPath, s.Config.HostSigningTlsPath, logger.Handler(mux, os.Stdout, logger.CommonLoggerType))
+		err = http.ListenAndServeTLS(fmt.Sprintf(":%d", s.Config.HttpListenPort), s.Config.HostSigningTlsPath, s.Config.HostSigningTlsPath, mux)
 	}
 	if err != nil {
 		log.Printf("Error starting HTTP server: %s", err)
 	}
+
 }
 
 func (s *SSOServer) GetSSHCerts(ctx context.Context, in *pb.SSHCertsRequest) (*pb.SSHCertsResponse, error) {
@@ -273,10 +280,24 @@ func CreateHostCertificate(hostname string, keyToSign ssh.PublicKey, signingKey 
 		ValidAfter:      uint64(now.Unix()),
 		ValidBefore:     uint64(end.Unix()),
 	}
+	if keyToSign.Type() == ssh.CertAlgoECDSA256v01 {
+		log.Printf("CreateHostCertificate error: Attempted to sign a signature, not a host key for: %s key: %s type: %s", hostname, ssh.FingerprintSHA256(keyToSign), keyToSign.Type())
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.WithFields(log.Fields{
+				"hostname":       hostname,
+				"keyFingerprint": ssh.FingerprintSHA256(keyToSign),
+				"keyType":        keyToSign.Type(),
+			}).Error("CreateHostCertificate SignCert panic'd, might have connected to a bad SSH server with bad host key")
+		}
+	}()
 	err = cert.SignCert(rand.Reader, signer)
 	if err != nil {
 		return nil, nil, err
 	}
+	log.Printf("Signed a host key for: %s key: %s type: %s", hostname, ssh.FingerprintSHA256(keyToSign), keyToSign.Type())
+	log.Printf("Signature of host key for: %s key: %s type: %s", hostname, ssh.FingerprintSHA256(cert.SignatureKey), cert.Type())
 	return cert.Marshal(), &end, nil
 }
 
@@ -306,6 +327,16 @@ func CreateUserCertificate(usernames []string, emailAddress string, keyToSign ss
 }
 
 func main() {
+	customFormatter := new(log.TextFormatter)
+	customFormatter.TimestampFormat = "2006-01-02 15:04:05"
+	log.SetFormatter(customFormatter)
+	customFormatter.FullTimestamp = true
+
+	hook := sentryhook.New(nil)                  // will use raven.DefaultClient, or provide custom client
+	hook.SetAsync(log.ErrorLevel)                // async (non-bloking) hook for errors
+	hook.SetSync(log.PanicLevel, log.FatalLevel) // sync (blocking) for fatal stuff
+
+	log.AddHook(hook)
 	if len(os.Args) != 2 {
 		log.Fatal("Please specify a config file for the server to use.")
 	}
