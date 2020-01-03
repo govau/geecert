@@ -68,7 +68,7 @@ func (s *SSOServer) makeHostCert(w http.ResponseWriter, h string) {
 	var earlyFailError = errors.New("fail now please")
 
 	if len(h) == 0 {
-		log.Printf("No hostname specified: %s", h)
+		log.Infof("No hostname specified: %s", h)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -89,31 +89,29 @@ func (s *SSOServer) makeHostCert(w http.ResponseWriter, h string) {
 			}
 			caKey, err := LoadPrivateKeyFromPEM(s.Config.CaKeyPath)
 			if err != nil {
-				log.Printf("Error LoadPrivateKeyFromPEM for hostname %s: ", h, err)
+				log.Errorf("Error LoadPrivateKeyFromPEM for hostname %s: ", h, err)
 				return err
 			}
 
 			cert, nva, err := CreateHostCertificate(h, key, caKey, time.Duration(s.Config.GenerateCertDurationSeconds)*time.Second)
 			if err != nil || cert == nil {
-				log.Printf("Error CreateHostCertificate for hostname %s: ", h, err)
+				log.Errorf("Error CreateHostCertificate for hostname %s: ", h, err)
 				return err
 			}
 			kt = key.Type()
 
-			log.Printf("Issued host certificate for %s valid until %s.\n", h, nva.Format(time.RFC3339))
+			log.Infof("Issued host certificate for %s valid until %s.\n", h, nva.Format(time.RFC3339))
 
 			certToReturn = cert
 			return earlyFailError
 		},
 	})
 	if err != nil && !strings.Contains(err.Error(), "fail now please") {
-		log.Printf("Error SSH connecting to hostname %s on port %d: %s ", h, s.Config.SshConnectForPublickeyPort, err)
+		log.Warnf("Error SSH connecting to hostname %s on port %d: %s ", h, s.Config.SshConnectForPublickeyPort, err)
 		w.WriteHeader(http.StatusBadRequest)
 		return
-	}
-	// Ignore error code for above, as we'll definitely fail due to no creds
-	if len(certToReturn) == 0 {
-		log.Printf("Error using SSH to retrieve certificate for hostname: %s", h)
+	} else if len(certToReturn) == 0 {
+		log.WithField("hostname", h).Errorf("Error using SSH to retrieve certificate for hostname: %s", h)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -122,6 +120,7 @@ func (s *SSOServer) makeHostCert(w http.ResponseWriter, h string) {
 }
 
 func (s *SSOServer) issueHostCertificate(w http.ResponseWriter, r *http.Request) {
+	log.Infof("Received issueHostCertificate from %s with user agent %s", r.RemoteAddr, r.UserAgent())
 	h := r.FormValue("host")
 	for _, m := range s.Config.AllowedHosts {
 		matched, err := filepath.Match(m, h)
@@ -135,7 +134,7 @@ func (s *SSOServer) issueHostCertificate(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
-	log.Printf("Did not match hostname: %s", h)
+	log.Infof("Did not match hostname: %s", h)
 	w.WriteHeader(http.StatusBadRequest)
 	return
 }
@@ -147,14 +146,25 @@ func (s *SSOServer) StartHTTP() {
 	var err error
 	if s.Config.HostSigningTlsPath == "" { // http
 		n := negroni.New()
-		n.Use(negronilogrus.NewMiddleware())
+		nl := negronilogrus.NewMiddlewareFromLogger(log.StandardLogger(), "web")
+		nl.Before = func(entry *log.Entry, req *http.Request, remoteAddr string) *log.Entry {
+			return entry.WithFields(log.Fields{
+				"request":   req.RequestURI,
+				"hostname":  req.Host,
+				"userAgent": req.UserAgent(),
+				"method":    req.Method,
+				"remote":    remoteAddr,
+			})
+		}
+		n.Use(nl)
+		n.Use(negroni.NewRecovery())
 		n.UseHandler(mux)
 		n.Run(fmt.Sprintf(":%d", s.Config.HttpListenPort))
 	} else {
 		err = http.ListenAndServeTLS(fmt.Sprintf(":%d", s.Config.HttpListenPort), s.Config.HostSigningTlsPath, s.Config.HostSigningTlsPath, mux)
 	}
 	if err != nil {
-		log.Printf("Error starting HTTP server: %s", err)
+		log.Errorf("Error starting HTTP server: %s", err)
 	}
 
 }
@@ -162,11 +172,13 @@ func (s *SSOServer) StartHTTP() {
 func (s *SSOServer) GetSSHCerts(ctx context.Context, in *pb.SSHCertsRequest) (*pb.SSHCertsResponse, error) {
 	idTokenClaims, err := s.Validator.ValidateIDToken(in.IdToken)
 	if err != nil {
+		log.WithContext(ctx).WithField("emailAddress", idTokenClaims.EmailAddress).Errorf("Error in ValidateIDToken for %s", idTokenClaims.EmailAddress)
 		return nil, err
 	}
 
 	userConf, ok := s.Config.AllowedUsers[idTokenClaims.EmailAddress]
 	if !ok {
+		log.WithContext(ctx).WithField("emailAddress", idTokenClaims.EmailAddress).Warnf("No certificates allowed for %s", idTokenClaims.EmailAddress)
 		return &pb.SSHCertsResponse{
 			Status: pb.ResponseCode_NO_CERTS_ALLOWED,
 		}, nil
@@ -200,7 +212,7 @@ func (s *SSOServer) GetSSHCerts(ctx context.Context, in *pb.SSHCertsRequest) (*p
 	for _, up := range userConf.Profiles {
 		p, ok := s.Config.UserProfiles[up]
 		if !ok {
-			log.Printf("Warning, profile not found for user (ignoring): %s", up)
+			log.WithContext(ctx).WithField("emailAddress", idTokenClaims.EmailAddress).Warnf("Warning, profile not found for user (ignoring): %s", up)
 			continue
 		}
 		for _, pp := range p.Principals {
@@ -229,10 +241,13 @@ func (s *SSOServer) GetSSHCerts(ctx context.Context, in *pb.SSHCertsRequest) (*p
 
 	cert, nva, err := CreateUserCertificate(principalList, idTokenClaims.EmailAddress, keyToSign, caKey, time.Duration(s.Config.GenerateCertDurationSeconds)*time.Second, perms)
 	if err != nil {
+		log.WithContext(ctx).WithField("emailAddress", idTokenClaims.EmailAddress).
+			Error("Error in CreateUserCertificate for %s", idTokenClaims.EmailAddress)
 		return nil, err
 	}
 
-	log.Printf("Issued certificate to %s valid until %s.\n", idTokenClaims.EmailAddress, nva.Format(time.RFC3339))
+	log.WithContext(ctx).WithField("emailAddress", idTokenClaims.EmailAddress).
+		Info("Issued user certificate to %s valid until %s.\n", idTokenClaims.EmailAddress, nva.Format(time.RFC3339))
 
 	return &pb.SSHCertsResponse{
 		Status:                 pb.ResponseCode_OK,
@@ -281,7 +296,8 @@ func CreateHostCertificate(hostname string, keyToSign ssh.PublicKey, signingKey 
 		ValidBefore:     uint64(end.Unix()),
 	}
 	if keyToSign.Type() == ssh.CertAlgoECDSA256v01 {
-		log.Printf("CreateHostCertificate error: Attempted to sign a signature, not a host key for: %s key: %s type: %s", hostname, ssh.FingerprintSHA256(keyToSign), keyToSign.Type())
+		log.WithField("hostname", hostname).Errorf("CreateHostCertificate error: Attempted to sign a signature, not a host key for: %s key: %s type: %s",
+			hostname, ssh.FingerprintSHA256(keyToSign), keyToSign.Type())
 	}
 	defer func() {
 		if r := recover(); r != nil {
@@ -296,8 +312,8 @@ func CreateHostCertificate(hostname string, keyToSign ssh.PublicKey, signingKey 
 	if err != nil {
 		return nil, nil, err
 	}
-	log.Printf("Signed a host key for: %s key: %s type: %s", hostname, ssh.FingerprintSHA256(keyToSign), keyToSign.Type())
-	log.Printf("Signature of host key for: %s key: %s type: %s", hostname, ssh.FingerprintSHA256(cert.SignatureKey), cert.Type())
+	log.WithField("hostname", hostname).Infof("Signed a host key for: %s key: %s type: %s", hostname, ssh.FingerprintSHA256(keyToSign), keyToSign.Type())
+	log.WithField("hostname", hostname).Infof("Signature of host key for: %s key: %s type: %s", hostname, ssh.FingerprintSHA256(cert.SignatureKey), cert.Type())
 	return cert.Marshal(), &end, nil
 }
 
@@ -321,6 +337,7 @@ func CreateUserCertificate(usernames []string, emailAddress string, keyToSign ss
 	}
 	err = cert.SignCert(rand.Reader, signer)
 	if err != nil {
+		log.Errorf("Error in user SignCert for %s", cert.KeyId)
 		return nil, nil, err
 	}
 	return cert.Marshal(), &end, nil
@@ -333,7 +350,7 @@ func main() {
 	customFormatter.FullTimestamp = true
 
 	hook := sentryhook.New(nil)                  // will use raven.DefaultClient, or provide custom client
-	hook.SetAsync(log.ErrorLevel)                // async (non-bloking) hook for errors
+	hook.SetAsync(log.ErrorLevel)                // async (non-blocking) hook for errors
 	hook.SetSync(log.PanicLevel, log.FatalLevel) // sync (blocking) for fatal stuff
 
 	log.AddHook(hook)
@@ -343,7 +360,7 @@ func main() {
 
 	confData, err := ioutil.ReadFile(os.Args[1])
 	if err != nil {
-		log.Fatal(err)
+		log.WithField("fileName", os.Args[1]).Fatal(err)
 	}
 
 	conf := &pb.ServerConfig{}
@@ -354,7 +371,7 @@ func main() {
 
 	tc, err := credentials.NewServerTLSFromFile(conf.ServerCertPath, conf.ServerKeyPath)
 	if err != nil {
-		log.Fatal(err)
+		log.WithField("ServerCertPath", conf.ServerCertPath).WithField("ServerKeyPath", conf.ServerKeyPath).Fatal(err)
 	}
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", conf.ListenPort))
@@ -377,7 +394,7 @@ func main() {
 	}
 	pb.RegisterGeeCertServerServer(grpcServer, sso)
 
-	log.Println("Serving...")
+	log.Info("Serving...")
 	if conf.HttpListenPort != 0 {
 		go sso.StartHTTP()
 	}
