@@ -34,18 +34,35 @@
   version = "v0.2.0"
 
 [[projects]]
-  digest = "1:239c4c7fd2159585454003d9be7207167970194216193a8a210b8d29576f19c9"
+  digest = "1:2356bcf5096ecb76bfcce7cb96af2d58c68ac63206c22d4d2aff9b9df70a486e"
   name = "github.com/golang/protobuf"
   packages = [
+    "jsonpb",
     "proto",
     "ptypes",
     "ptypes/any",
     "ptypes/duration",
+    "ptypes/struct",
     "ptypes/timestamp",
   ]
   pruneopts = "UT"
   revision = "b5d812f8a3706043e23a9cd5babf2e5423744d30"
   version = "v1.3.1"
+
+[[projects]]
+  digest = "1:2f177f8f3735838ce3b043b2d18061149b1b4ee81052b158ad0cacef6a8eb242"
+  name = "github.com/grpc-ecosystem/go-grpc-middleware"
+  packages = [
+    ".",
+    "logging",
+    "logging/logrus",
+    "logging/logrus/ctxlogrus",
+    "tags",
+    "tags/logrus",
+  ]
+  pruneopts = "UT"
+  revision = "dd15ed025b6054e5253963e355991f3070d4e593"
+  version = "v1.1.0"
 
 [[projects]]
   branch = "master"
@@ -237,10 +254,12 @@
     "github.com/dmksnnk/sentryhook",
     "github.com/getsentry/raven-go",
     "github.com/golang/protobuf/proto",
+    "github.com/grpc-ecosystem/go-grpc-middleware/logging/logrus",
     "github.com/hydrogen18/stoppableListener",
     "github.com/meatballhat/negroni-logrus",
     "github.com/mitchellh/go-homedir",
     "github.com/pkg/browser",
+    "github.com/pkg/errors",
     "github.com/sirupsen/logrus",
     "github.com/urfave/negroni",
     "golang.org/x/crypto/ssh",

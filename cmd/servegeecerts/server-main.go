@@ -50,6 +50,9 @@ import (
 
 	"github.com/dmksnnk/sentryhook"
 	"github.com/getsentry/raven-go"
+	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/logrus"
+	grpc_ctxtags "github.com/grpc-ecosystem/go-grpc-middleware/tags"
 	"github.com/meatballhat/negroni-logrus"
 	log "github.com/sirupsen/logrus"
 	"github.com/urfave/negroni"
@@ -125,7 +128,7 @@ func (s *SSOServer) issueHostCertificate(w http.ResponseWriter, r *http.Request)
 	for _, m := range s.Config.AllowedHosts {
 		matched, err := filepath.Match(m, h)
 		if err != nil {
-			log.Printf("Error matching hostname: %s", h)
+			log.Infof("Error matching hostname: %s", h)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -247,7 +250,7 @@ func (s *SSOServer) GetSSHCerts(ctx context.Context, in *pb.SSHCertsRequest) (*p
 	}
 
 	log.WithContext(ctx).WithField("emailAddress", idTokenClaims.EmailAddress).
-		Info("Issued user certificate to %s valid until %s.\n", idTokenClaims.EmailAddress, nva.Format(time.RFC3339))
+		Info("Issued user certificate to %s from %s valid until %s.\n", idTokenClaims.EmailAddress, nva.Format(time.RFC3339))
 
 	return &pb.SSHCertsResponse{
 		Status:                 pb.ResponseCode_OK,
@@ -344,6 +347,7 @@ func CreateUserCertificate(usernames []string, emailAddress string, keyToSign ss
 }
 
 func main() {
+	// logging setup
 	customFormatter := new(log.TextFormatter)
 	customFormatter.TimestampFormat = "2006-01-02 15:04:05"
 	log.SetFormatter(customFormatter)
@@ -352,8 +356,12 @@ func main() {
 	hook := sentryhook.New(nil)                  // will use raven.DefaultClient, or provide custom client
 	hook.SetAsync(log.ErrorLevel)                // async (non-blocking) hook for errors
 	hook.SetSync(log.PanicLevel, log.FatalLevel) // sync (blocking) for fatal stuff
-
 	log.AddHook(hook)
+
+	logrusEntry := log.NewEntry(log.StandardLogger())
+	// Make sure that log statements internal to gRPC library are logged using the logrus Logger as well.
+	grpc_logrus.ReplaceGrpcLogger(logrusEntry)
+
 	if len(os.Args) != 2 {
 		log.Fatal("Please specify a config file for the server to use.")
 	}
@@ -379,7 +387,17 @@ func main() {
 		log.Fatal(err)
 	}
 
-	grpcServer := grpc.NewServer(grpc.Creds(tc))
+	grpcServer := grpc.NewServer(
+		grpc.StreamInterceptor(grpc_middleware.ChainStreamServer(
+			grpc_ctxtags.StreamServerInterceptor(),
+			grpc_logrus.StreamServerInterceptor(logrusEntry),
+		)),
+		grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(
+			grpc_ctxtags.UnaryServerInterceptor(),
+			grpc_logrus.UnaryServerInterceptor(logrusEntry),
+		)),
+		grpc.Creds(tc))
+
 	sso := &SSOServer{
 		Config: conf,
 		Validator: &geecert.OIDCIDTokenValidator{
