@@ -123,8 +123,12 @@ func (s *SSOServer) makeHostCert(w http.ResponseWriter, h string) {
 }
 
 func (s *SSOServer) issueHostCertificate(w http.ResponseWriter, r *http.Request) {
-	log.Infof("Received issueHostCertificate from %s with user agent %s", r.RemoteAddr, r.UserAgent())
+
 	h := r.FormValue("host")
+	// Exclude monitoring http requests from logging
+	if r.UserAgent() != "Go-http-client/1.1" && h != "" {
+		log.Infof("Received issueHostCertificate from %s with user agent %s", r.RemoteAddr, r.UserAgent())
+	}
 	for _, m := range s.Config.AllowedHosts {
 		matched, err := filepath.Match(m, h)
 		if err != nil {
@@ -137,7 +141,10 @@ func (s *SSOServer) issueHostCertificate(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
-	log.Infof("Did not match hostname: %s", h)
+	// Exclude monitoring http requests from logging
+	if r.UserAgent() != "Go-http-client/1.1" && h != "" {
+		log.Warnf("Hostname: %s did not match AllowedHosts", h)
+	}
 	w.WriteHeader(http.StatusBadRequest)
 	return
 }
@@ -250,7 +257,7 @@ func (s *SSOServer) GetSSHCerts(ctx context.Context, in *pb.SSHCertsRequest) (*p
 	}
 
 	log.WithContext(ctx).WithField("emailAddress", idTokenClaims.EmailAddress).
-		Info("Issued user certificate to %s from %s valid until %s.\n", idTokenClaims.EmailAddress, nva.Format(time.RFC3339))
+		Infof("Issued user certificate to %s from %s valid until %s.\n", idTokenClaims.EmailAddress, nva.Format(time.RFC3339))
 
 	return &pb.SSHCertsResponse{
 		Status:                 pb.ResponseCode_OK,
