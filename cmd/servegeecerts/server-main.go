@@ -23,6 +23,8 @@ import (
 	"encoding/pem"
 	"fmt"
 	"github.com/pkg/errors"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"io/ioutil"
 	"net"
 	"os"
@@ -52,6 +54,7 @@ import (
 	"github.com/getsentry/raven-go"
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	"github.com/grpc-ecosystem/go-grpc-middleware/logging/logrus"
+	grpc_recovery "github.com/grpc-ecosystem/go-grpc-middleware/recovery"
 	grpc_ctxtags "github.com/grpc-ecosystem/go-grpc-middleware/tags"
 	"github.com/meatballhat/negroni-logrus"
 	log "github.com/sirupsen/logrus"
@@ -257,7 +260,7 @@ func (s *SSOServer) GetSSHCerts(ctx context.Context, in *pb.SSHCertsRequest) (*p
 	}
 
 	log.WithContext(ctx).WithField("emailAddress", idTokenClaims.EmailAddress).
-		Infof("Issued user certificate to %s from %s valid until %s.\n", idTokenClaims.EmailAddress, nva.Format(time.RFC3339))
+		Infof("Issued user certificate to %s valid until %s.\n", idTokenClaims.EmailAddress, nva.Format(time.RFC3339))
 
 	return &pb.SSHCertsResponse{
 		Status:                 pb.ResponseCode_OK,
@@ -393,15 +396,25 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
+	// Define customfunc to handle panic
+	customFunc := func(ctx context.Context, p interface{}) (err error) {
+		log.WithContext(ctx).Errorf("panic triggered: %v", p)
+		return status.Errorf(codes.Unknown, "panic triggered: %v", p)
+	}
+	// Shared options for the logger, with a custom gRPC code to log level function.
+	opts := []grpc_recovery.Option{
+		grpc_recovery.WithRecoveryHandlerContext(customFunc),
+	}
 	grpcServer := grpc.NewServer(
 		grpc.StreamInterceptor(grpc_middleware.ChainStreamServer(
 			grpc_ctxtags.StreamServerInterceptor(),
 			grpc_logrus.StreamServerInterceptor(logrusEntry),
+			grpc_recovery.StreamServerInterceptor(opts...), // panic interceptor must always be last
 		)),
 		grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(
 			grpc_ctxtags.UnaryServerInterceptor(),
 			grpc_logrus.UnaryServerInterceptor(logrusEntry),
+			grpc_recovery.UnaryServerInterceptor(opts...), // panic interceptor must always be last
 		)),
 		grpc.Creds(tc))
 
