@@ -1,14 +1,14 @@
 ##### SERVER CONFIGURATION
 
-# Path to the SSH CA private key, e.g. ssh-keygen -t rsa -b 4096 -C "My CA" -N "" -f /path/to/ssh-ca
-ca_key_path: "/path/to/ssh-ca"
+# Path to the SSH CA private key, e.g. ssh-keygen -t rsa -b 4096 -C "My CA" -N "" -f /tmp/ssh-ca
+ca_key_path: "/tmp/ssh-ca"
 
 # Port to listen for gRPC requests on (HTTP/2).
 listen_port: 10000
 
-# TLS cert / key to use, e.g. openssl req -x509 -newkey rsa:4096 -keyout /path/to/grpc-key.pem -out /path/to/grpc-cert.pem -days 3600 -nodes -subj '/CN=localhost' -batch
-server_cert_path: "/path/to/grpc-key.pem"
-server_key_path: "/path/to/grpc-cert.pem"
+# TLS cert / key to use, e.g. openssl req -x509 -newkey rsa:4096 -keyout /tmp/grpc-key.pem -out /tmp/grpc-cert.pem -days 3600 -nodes -subj '/CN=localhost' -batch
+server_cert_path: "/tmp/grpc-cert.pem"
+server_key_path: "/tmp/grpc-key.pem"
 
 
 ##### ID TOKEN VALIDATION
@@ -63,6 +63,7 @@ allowed_users: <
 >
 
 # Uncomment the following if you wish to issue host certificates
-# http_listen_port: 10001 # port to listen to HTTP requests on
-# allowed_hosts: "*.yourdomain.com" # list of glob hostnames that you will issue certs for
-# caddy_file_path: "/path/to/sample_caddy_file" # edit the sample_caddy_file
+http_listen_port: 10001 # port to listen to HTTP requests on
+allowed_hosts: "*" # list of glob hostnames that you will issue certs for
+ssh_connect_for_publickey_port: 32212
+#caddy_file_path: "/tmp/sample_caddy_file" # edit the sample_caddy_file

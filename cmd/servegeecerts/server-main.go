@@ -21,10 +21,11 @@ package main
 import (
 	"encoding/base64"
 	"encoding/pem"
-	"errors"
 	"fmt"
+	"github.com/pkg/errors"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"io/ioutil"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -48,6 +49,16 @@ import (
 	"net/http"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/dmksnnk/sentryhook"
+	"github.com/getsentry/raven-go"
+	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/logrus"
+	grpc_recovery "github.com/grpc-ecosystem/go-grpc-middleware/recovery"
+	grpc_ctxtags "github.com/grpc-ecosystem/go-grpc-middleware/tags"
+	"github.com/meatballhat/negroni-logrus"
+	log "github.com/sirupsen/logrus"
+	"github.com/urfave/negroni"
 )
 
 type SSOServer struct {
@@ -60,12 +71,19 @@ type SSOServer struct {
 func (s *SSOServer) makeHostCert(w http.ResponseWriter, h string) {
 	var certToReturn []byte
 	var kt string
+	var earlyFailError = errors.New("fail now please")
+
+	if len(h) == 0 {
+		log.Infof("No hostname specified: %s", h)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 
 	// Derived from ssh.common.supportedHostKeyAlgos with certificate host key types removed
 	var supportedHostKeyAlgos = []string{
 		ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521, ssh.KeyAlgoRSA, ssh.KeyAlgoDSA, ssh.KeyAlgoED25519,
 	}
-	ssh.Dial("tcp", fmt.Sprintf("%s:%d", h, s.Config.SshConnectForPublickeyPort), &ssh.ClientConfig{
+	_, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", h, s.Config.SshConnectForPublickeyPort), &ssh.ClientConfig{
 		User: "ca",
 		Auth: []ssh.AuthMethod{
 			ssh.Password("wrongpassignoreme"),
@@ -77,24 +95,29 @@ func (s *SSOServer) makeHostCert(w http.ResponseWriter, h string) {
 			}
 			caKey, err := LoadPrivateKeyFromPEM(s.Config.CaKeyPath)
 			if err != nil {
+				log.Errorf("Error LoadPrivateKeyFromPEM for hostname %s: ", h, err)
 				return err
 			}
 
 			cert, nva, err := CreateHostCertificate(h, key, caKey, time.Duration(s.Config.GenerateCertDurationSeconds)*time.Second)
-			if err != nil {
+			if err != nil || cert == nil {
+				log.Errorf("Error CreateHostCertificate for hostname %s: ", h, err)
 				return err
 			}
 			kt = key.Type()
 
-			log.Printf("Issued host certificate for %s valid until %s.\n", h, nva.Format(time.RFC3339))
+			log.Infof("Issued host certificate for %s valid until %s.\n", h, nva.Format(time.RFC3339))
 
 			certToReturn = cert
-			return errors.New("fail now please")
+			return earlyFailError
 		},
 	})
-
-	// Ignore error code for above, as we'll definitely fail due to no creds
-	if len(certToReturn) == 0 {
+	if err != nil && !strings.Contains(err.Error(), "fail now please") {
+		log.Warnf("Error SSH connecting to hostname %s on port %d: %s ", h, s.Config.SshConnectForPublickeyPort, err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	} else if len(certToReturn) == 0 {
+		log.WithField("hostname", h).Errorf("Error using SSH to retrieve certificate for hostname: %s", h)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -103,10 +126,16 @@ func (s *SSOServer) makeHostCert(w http.ResponseWriter, h string) {
 }
 
 func (s *SSOServer) issueHostCertificate(w http.ResponseWriter, r *http.Request) {
+
 	h := r.FormValue("host")
+	// Exclude monitoring http requests from logging
+	if r.UserAgent() != "Go-http-client/1.1" && h != "" {
+		log.Infof("Received issueHostCertificate from %s with user agent %s", r.RemoteAddr, r.UserAgent())
+	}
 	for _, m := range s.Config.AllowedHosts {
 		matched, err := filepath.Match(m, h)
 		if err != nil {
+			log.Infof("Error matching hostname: %s", h)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -115,31 +144,54 @@ func (s *SSOServer) issueHostCertificate(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+	// Exclude monitoring http requests from logging
+	if r.UserAgent() != "Go-http-client/1.1" && h != "" {
+		log.Warnf("Hostname: %s did not match AllowedHosts", h)
+	}
 	w.WriteHeader(http.StatusBadRequest)
 	return
 }
 
 func (s *SSOServer) StartHTTP() {
-	http.HandleFunc("/hostCertificate", s.issueHostCertificate)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/hostCertificate", raven.RecoveryHandler(s.issueHostCertificate))
 	var err error
 	if s.Config.HostSigningTlsPath == "" { // http
-		err = http.ListenAndServe(fmt.Sprintf(":%d", s.Config.HttpListenPort), nil)
+		n := negroni.New()
+		nl := negronilogrus.NewMiddlewareFromLogger(log.StandardLogger(), "web")
+		nl.Before = func(entry *log.Entry, req *http.Request, remoteAddr string) *log.Entry {
+			return entry.WithFields(log.Fields{
+				"request":   req.RequestURI,
+				"hostname":  req.Host,
+				"userAgent": req.UserAgent(),
+				"method":    req.Method,
+				"remote":    remoteAddr,
+			})
+		}
+		n.Use(nl)
+		n.Use(negroni.NewRecovery())
+		n.UseHandler(mux)
+		n.Run(fmt.Sprintf(":%d", s.Config.HttpListenPort))
 	} else {
-		err = http.ListenAndServeTLS(fmt.Sprintf(":%d", s.Config.HttpListenPort), s.Config.HostSigningTlsPath, s.Config.HostSigningTlsPath, nil)
+		err = http.ListenAndServeTLS(fmt.Sprintf(":%d", s.Config.HttpListenPort), s.Config.HostSigningTlsPath, s.Config.HostSigningTlsPath, mux)
 	}
 	if err != nil {
-		log.Printf("Error starting HTTP server: %s", err)
+		log.Errorf("Error starting HTTP server: %s", err)
 	}
+
 }
 
 func (s *SSOServer) GetSSHCerts(ctx context.Context, in *pb.SSHCertsRequest) (*pb.SSHCertsResponse, error) {
 	idTokenClaims, err := s.Validator.ValidateIDToken(in.IdToken)
 	if err != nil {
+		log.WithContext(ctx).WithField("emailAddress", idTokenClaims.EmailAddress).Errorf("Error in ValidateIDToken for %s", idTokenClaims.EmailAddress)
 		return nil, err
 	}
 
 	userConf, ok := s.Config.AllowedUsers[idTokenClaims.EmailAddress]
 	if !ok {
+		log.WithContext(ctx).WithField("emailAddress", idTokenClaims.EmailAddress).Warnf("No certificates allowed for %s", idTokenClaims.EmailAddress)
 		return &pb.SSHCertsResponse{
 			Status: pb.ResponseCode_NO_CERTS_ALLOWED,
 		}, nil
@@ -173,7 +225,7 @@ func (s *SSOServer) GetSSHCerts(ctx context.Context, in *pb.SSHCertsRequest) (*p
 	for _, up := range userConf.Profiles {
 		p, ok := s.Config.UserProfiles[up]
 		if !ok {
-			log.Printf("Warning, profile not found for user (ignoring): %s", up)
+			log.WithContext(ctx).WithField("emailAddress", idTokenClaims.EmailAddress).Warnf("Warning, profile not found for user (ignoring): %s", up)
 			continue
 		}
 		for _, pp := range p.Principals {
@@ -202,10 +254,13 @@ func (s *SSOServer) GetSSHCerts(ctx context.Context, in *pb.SSHCertsRequest) (*p
 
 	cert, nva, err := CreateUserCertificate(principalList, idTokenClaims.EmailAddress, keyToSign, caKey, time.Duration(s.Config.GenerateCertDurationSeconds)*time.Second, perms)
 	if err != nil {
+		log.WithContext(ctx).WithField("emailAddress", idTokenClaims.EmailAddress).
+			Error("Error in CreateUserCertificate for %s", idTokenClaims.EmailAddress)
 		return nil, err
 	}
 
-	log.Printf("Issued certificate to %s valid until %s.\n", idTokenClaims.EmailAddress, nva.Format(time.RFC3339))
+	log.WithContext(ctx).WithField("emailAddress", idTokenClaims.EmailAddress).
+		Infof("Issued user certificate to %s valid until %s.\n", idTokenClaims.EmailAddress, nva.Format(time.RFC3339))
 
 	return &pb.SSHCertsResponse{
 		Status:                 pb.ResponseCode_OK,
@@ -253,10 +308,25 @@ func CreateHostCertificate(hostname string, keyToSign ssh.PublicKey, signingKey 
 		ValidAfter:      uint64(now.Unix()),
 		ValidBefore:     uint64(end.Unix()),
 	}
+	if keyToSign.Type() == ssh.CertAlgoECDSA256v01 {
+		log.WithField("hostname", hostname).Errorf("CreateHostCertificate error: Attempted to sign a signature, not a host key for: %s key: %s type: %s",
+			hostname, ssh.FingerprintSHA256(keyToSign), keyToSign.Type())
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.WithFields(log.Fields{
+				"hostname":       hostname,
+				"keyFingerprint": ssh.FingerprintSHA256(keyToSign),
+				"keyType":        keyToSign.Type(),
+			}).Error("CreateHostCertificate SignCert panic'd, might have connected to a bad SSH server with bad host key")
+		}
+	}()
 	err = cert.SignCert(rand.Reader, signer)
 	if err != nil {
 		return nil, nil, err
 	}
+	log.WithField("hostname", hostname).Infof("Signed a host key for: %s key: %s type: %s", hostname, ssh.FingerprintSHA256(keyToSign), keyToSign.Type())
+	log.WithField("hostname", hostname).Infof("Signature of host key for: %s key: %s type: %s", hostname, ssh.FingerprintSHA256(cert.SignatureKey), cert.Type())
 	return cert.Marshal(), &end, nil
 }
 
@@ -280,19 +350,35 @@ func CreateUserCertificate(usernames []string, emailAddress string, keyToSign ss
 	}
 	err = cert.SignCert(rand.Reader, signer)
 	if err != nil {
+		log.Errorf("Error in user SignCert for %s", cert.KeyId)
 		return nil, nil, err
 	}
 	return cert.Marshal(), &end, nil
 }
 
 func main() {
+	// logging setup
+	customFormatter := new(log.TextFormatter)
+	customFormatter.TimestampFormat = "2006-01-02 15:04:05"
+	log.SetFormatter(customFormatter)
+	customFormatter.FullTimestamp = true
+
+	hook := sentryhook.New(nil)                  // will use raven.DefaultClient, or provide custom client
+	hook.SetAsync(log.ErrorLevel)                // async (non-blocking) hook for errors
+	hook.SetSync(log.PanicLevel, log.FatalLevel) // sync (blocking) for fatal stuff
+	log.AddHook(hook)
+
+	logrusEntry := log.NewEntry(log.StandardLogger())
+	// Make sure that log statements internal to gRPC library are logged using the logrus Logger as well.
+	grpc_logrus.ReplaceGrpcLogger(logrusEntry)
+
 	if len(os.Args) != 2 {
 		log.Fatal("Please specify a config file for the server to use.")
 	}
 
 	confData, err := ioutil.ReadFile(os.Args[1])
 	if err != nil {
-		log.Fatal(err)
+		log.WithField("fileName", os.Args[1]).Fatal(err)
 	}
 
 	conf := &pb.ServerConfig{}
@@ -303,15 +389,35 @@ func main() {
 
 	tc, err := credentials.NewServerTLSFromFile(conf.ServerCertPath, conf.ServerKeyPath)
 	if err != nil {
-		log.Fatal(err)
+		log.WithField("ServerCertPath", conf.ServerCertPath).WithField("ServerKeyPath", conf.ServerKeyPath).Fatal(err)
 	}
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", conf.ListenPort))
 	if err != nil {
 		log.Fatal(err)
 	}
+	// Define customfunc to handle panic
+	customFunc := func(ctx context.Context, p interface{}) (err error) {
+		log.WithContext(ctx).Errorf("panic triggered: %v", p)
+		return status.Errorf(codes.Unknown, "panic triggered: %v", p)
+	}
+	// Shared options for the logger, with a custom gRPC code to log level function.
+	opts := []grpc_recovery.Option{
+		grpc_recovery.WithRecoveryHandlerContext(customFunc),
+	}
+	grpcServer := grpc.NewServer(
+		grpc.StreamInterceptor(grpc_middleware.ChainStreamServer(
+			grpc_ctxtags.StreamServerInterceptor(),
+			grpc_logrus.StreamServerInterceptor(logrusEntry),
+			grpc_recovery.StreamServerInterceptor(opts...), // panic interceptor must always be last
+		)),
+		grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(
+			grpc_ctxtags.UnaryServerInterceptor(),
+			grpc_logrus.UnaryServerInterceptor(logrusEntry),
+			grpc_recovery.UnaryServerInterceptor(opts...), // panic interceptor must always be last
+		)),
+		grpc.Creds(tc))
 
-	grpcServer := grpc.NewServer(grpc.Creds(tc))
 	sso := &SSOServer{
 		Config: conf,
 		Validator: &geecert.OIDCIDTokenValidator{
@@ -326,7 +432,7 @@ func main() {
 	}
 	pb.RegisterGeeCertServerServer(grpcServer, sso)
 
-	log.Println("Serving...")
+	log.Info("Serving...")
 	if conf.HttpListenPort != 0 {
 		go sso.StartHTTP()
 	}
