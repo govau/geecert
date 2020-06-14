@@ -19,6 +19,7 @@ limitations under the License.
 package main
 
 import (
+	"crypto/sha512"
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
@@ -293,6 +294,17 @@ func LoadPrivateKeyFromPEM(path string) (*rsa.PrivateKey, error) {
 	return key, nil
 }
 
+// FingerprintSHA512 returns the user presentation of the key's
+// fingerprint as unpadded base64 encoded sha512 hash.
+// This format was introduced from OpenSSH 7.2.
+// http://www.openssh.com/txt/release-7.2
+// https://tools.ietf.org/html/rfc4648#section-3.2 (unpadded base64 encoding)
+func FingerprintSHA512(pubKey ssh.PublicKey) string {
+	sha512sum := sha512.Sum512(pubKey.Marshal())
+	hash := base64.RawStdEncoding.EncodeToString(sha512sum[:])
+	return "SHA512:" + hash
+}
+
 func CreateHostCertificate(hostname string, keyToSign ssh.PublicKey, signingKey *rsa.PrivateKey, duration time.Duration) ([]byte, *time.Time, error) {
 	signer, err := ssh.NewSignerFromKey(signingKey)
 	if err != nil {
@@ -310,7 +322,7 @@ func CreateHostCertificate(hostname string, keyToSign ssh.PublicKey, signingKey 
 	}
 	if keyToSign.Type() == ssh.CertAlgoECDSA256v01 {
 		log.WithField("hostname", hostname).Errorf("CreateHostCertificate error: Attempted to sign a signature, not a host key for: %s key: %s type: %s",
-			hostname, ssh.FingerprintSHA256(keyToSign), keyToSign.Type())
+			hostname, FingerprintSHA512(keyToSign), keyToSign.Type())
 	}
 	defer func() {
 		if r := recover(); r != nil {
