@@ -11,6 +11,7 @@ import (
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
 	math "math"
+	"strings"
 )
 
 // Reference imports to suppress errors if they are not otherwise used.
@@ -233,6 +234,10 @@ func (m *ServerConfig) GetGenerateCertDurationSeconds() int32 {
 
 func (m *ServerConfig) GetAllowedUsers() map[string]*ServerConfig_UserConfig {
 	if m != nil {
+		// convert all map keys - user email addresses - to lower case
+		for userEmail, value := range m.AllowedUsers {
+			m.AllowedUsers[strings.ToLower(userEmail)] = value
+		}
 		return m.AllowedUsers
 	}
 	return nil

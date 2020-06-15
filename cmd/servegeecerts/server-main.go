@@ -185,14 +185,16 @@ func (s *SSOServer) StartHTTP() {
 
 func (s *SSOServer) GetSSHCerts(ctx context.Context, in *pb.SSHCertsRequest) (*pb.SSHCertsResponse, error) {
 	idTokenClaims, err := s.Validator.ValidateIDToken(in.IdToken)
+	// use lowercase of user claimed email
+	userEmail := strings.ToLower(idTokenClaims.EmailAddress)
 	if err != nil {
 		log.WithContext(ctx).WithField("emailAddress", idTokenClaims.EmailAddress).Errorf("Error in ValidateIDToken for %s", idTokenClaims.EmailAddress)
 		return nil, err
 	}
 
-	userConf, ok := s.Config.AllowedUsers[idTokenClaims.EmailAddress]
+	userConf, ok := s.Config.AllowedUsers[userEmail]
 	if !ok {
-		log.WithContext(ctx).WithField("emailAddress", idTokenClaims.EmailAddress).Warnf("No certificates allowed for %s", idTokenClaims.EmailAddress)
+		log.WithContext(ctx).WithField("emailAddress", idTokenClaims.EmailAddress).Errorf("No certificates allowed for %s", idTokenClaims.EmailAddress)
 		return &pb.SSHCertsResponse{
 			Status: pb.ResponseCode_NO_CERTS_ALLOWED,
 		}, nil
