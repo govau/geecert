@@ -138,7 +138,7 @@
     "internal/unsafeheader",
     "unix"
   ]
-  revision = "226ff32320da7b90d0b5bc2365f4e359c466fb78"
+  revision = "f1bc736245b146b19d485cdbc534f9a765257080"
 
 [[projects]]
   name = "golang.org/x/text"
@@ -167,7 +167,7 @@
   branch = "master"
   name = "google.golang.org/genproto"
   packages = ["googleapis/rpc/status"]
-  revision = "7676ae05be1122540d5cebd33d3d5eb63459ecfc"
+  revision = "fd031eab31e75e08eaf5b79fab1a0c9add92ffe6"
 
 [[projects]]
   name = "google.golang.org/grpc"
