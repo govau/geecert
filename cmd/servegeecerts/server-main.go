@@ -330,7 +330,7 @@ func CreateHostCertificate(hostname string, keyToSign ssh.PublicKey, signingKey 
 		if r := recover(); r != nil {
 			log.WithFields(log.Fields{
 				"hostname":       hostname,
-				"keyFingerprint": ssh.FingerprintSHA256(keyToSign),
+				"keyFingerprint": FingerprintSHA512(keyToSign),
 				"keyType":        keyToSign.Type(),
 			}).Error("CreateHostCertificate SignCert panic'd, might have connected to a bad SSH server with bad host key")
 		}
@@ -339,8 +339,8 @@ func CreateHostCertificate(hostname string, keyToSign ssh.PublicKey, signingKey 
 	if err != nil {
 		return nil, nil, err
 	}
-	log.WithField("hostname", hostname).Infof("Signed a host key for: %s key: %s type: %s", hostname, ssh.FingerprintSHA256(keyToSign), keyToSign.Type())
-	log.WithField("hostname", hostname).Infof("Signature of host key for: %s key: %s type: %s", hostname, ssh.FingerprintSHA256(cert.SignatureKey), cert.Type())
+	log.WithField("hostname", hostname).Infof("Signed a host key for: %s key: %s type: %s", hostname, FingerprintSHA512(keyToSign), keyToSign.Type())
+	log.WithField("hostname", hostname).Infof("Signature of host key for: %s key: %s type: %s", hostname, FingerprintSHA512(cert.SignatureKey), cert.Type())
 	return cert.Marshal(), &end, nil
 }
 
