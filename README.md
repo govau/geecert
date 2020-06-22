@@ -54,6 +54,14 @@ To build and install new server and client after changing Go source, run:
 go install github.com/continusec/geecert/cmd/...
 ```
 
+To generate test certificates:
+```bash
+# ssh-keygen -t rsa -b 4096 -C "My CA" -N "" -f /tmp/ssh-ca 
+# be careful of PKCS#1 vs. PKCS#8 https://stackoverflow.com/questions/20065304/differences-between-begin-rsa-private-key-and-begin-private-key/20065522#20065522
+openssl genrsa -out /tmp/ssh-ca 512
+openssl req -x509 -newkey rsa:4096 -keyout /tmp/grpc-key.pem -out /tmp/grpc-cert.pem -days 3600 -nodes -subj '/CN=localhost' -batch
+```
+
 ## SSO Server
 
 The SSO Server can be built from source assuming a working `golang` install. It does however compile to a single statically linked binary, so once built that binary can be distributed to another machine without needing anything else.

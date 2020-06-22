@@ -4,6 +4,31 @@
 
 ## [Unreleased] -
 
+## [2.0.1] - 2020-05-25
+
+### Fixed
+
+- Recovery middleware now checks that `Formatter` is not `nil` before calling
+
+## [2.0.0] - 2020-05-25
+
+### Changed
+
+- `Recovery.PrintStack`, when false, now also supresses the panic message in
+  addition to supressing the stack trace
+
+### Fixed
+
+- `Negroni.With()` now copies handlers to avoid mutating the original `Negroni`
+  instance if `Use` is called on the new `Negroni` instance
+
+### Added
+
+- `Recovery.LogStack` was added to control whether the stacktrace is logged for
+  panics
+
+### Changed
+
 ## [1.0.0] - 2018-09-01
 
 ### Fixed

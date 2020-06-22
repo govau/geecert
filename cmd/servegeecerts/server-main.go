@@ -19,6 +19,7 @@ limitations under the License.
 package main
 
 import (
+	"crypto/sha512"
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
@@ -184,14 +185,16 @@ func (s *SSOServer) StartHTTP() {
 
 func (s *SSOServer) GetSSHCerts(ctx context.Context, in *pb.SSHCertsRequest) (*pb.SSHCertsResponse, error) {
 	idTokenClaims, err := s.Validator.ValidateIDToken(in.IdToken)
+	// use lowercase of user claimed email
+	userEmail := strings.ToLower(idTokenClaims.EmailAddress)
 	if err != nil {
 		log.WithContext(ctx).WithField("emailAddress", idTokenClaims.EmailAddress).Errorf("Error in ValidateIDToken for %s", idTokenClaims.EmailAddress)
 		return nil, err
 	}
 
-	userConf, ok := s.Config.AllowedUsers[idTokenClaims.EmailAddress]
+	userConf, ok := s.Config.AllowedUsers[userEmail]
 	if !ok {
-		log.WithContext(ctx).WithField("emailAddress", idTokenClaims.EmailAddress).Warnf("No certificates allowed for %s", idTokenClaims.EmailAddress)
+		log.WithContext(ctx).WithField("emailAddress", idTokenClaims.EmailAddress).Errorf("No certificates allowed for %s", idTokenClaims.EmailAddress)
 		return &pb.SSHCertsResponse{
 			Status: pb.ResponseCode_NO_CERTS_ALLOWED,
 		}, nil
@@ -293,6 +296,17 @@ func LoadPrivateKeyFromPEM(path string) (*rsa.PrivateKey, error) {
 	return key, nil
 }
 
+// FingerprintSHA512 returns the user presentation of the key's
+// fingerprint as unpadded base64 encoded sha512 hash.
+// This format was introduced from OpenSSH 7.2.
+// http://www.openssh.com/txt/release-7.2
+// https://tools.ietf.org/html/rfc4648#section-3.2 (unpadded base64 encoding)
+func FingerprintSHA512(pubKey ssh.PublicKey) string {
+	sha512sum := sha512.Sum512(pubKey.Marshal())
+	hash := base64.RawStdEncoding.EncodeToString(sha512sum[:])
+	return "SHA512:" + hash
+}
+
 func CreateHostCertificate(hostname string, keyToSign ssh.PublicKey, signingKey *rsa.PrivateKey, duration time.Duration) ([]byte, *time.Time, error) {
 	signer, err := ssh.NewSignerFromKey(signingKey)
 	if err != nil {
@@ -310,13 +324,13 @@ func CreateHostCertificate(hostname string, keyToSign ssh.PublicKey, signingKey 
 	}
 	if keyToSign.Type() == ssh.CertAlgoECDSA256v01 {
 		log.WithField("hostname", hostname).Errorf("CreateHostCertificate error: Attempted to sign a signature, not a host key for: %s key: %s type: %s",
-			hostname, ssh.FingerprintSHA256(keyToSign), keyToSign.Type())
+			hostname, FingerprintSHA512(keyToSign), keyToSign.Type())
 	}
 	defer func() {
 		if r := recover(); r != nil {
 			log.WithFields(log.Fields{
 				"hostname":       hostname,
-				"keyFingerprint": ssh.FingerprintSHA256(keyToSign),
+				"keyFingerprint": FingerprintSHA512(keyToSign),
 				"keyType":        keyToSign.Type(),
 			}).Error("CreateHostCertificate SignCert panic'd, might have connected to a bad SSH server with bad host key")
 		}
@@ -325,8 +339,8 @@ func CreateHostCertificate(hostname string, keyToSign ssh.PublicKey, signingKey 
 	if err != nil {
 		return nil, nil, err
 	}
-	log.WithField("hostname", hostname).Infof("Signed a host key for: %s key: %s type: %s", hostname, ssh.FingerprintSHA256(keyToSign), keyToSign.Type())
-	log.WithField("hostname", hostname).Infof("Signature of host key for: %s key: %s type: %s", hostname, ssh.FingerprintSHA256(cert.SignatureKey), cert.Type())
+	log.WithField("hostname", hostname).Infof("Signed a host key for: %s key: %s type: %s", hostname, FingerprintSHA512(keyToSign), keyToSign.Type())
+	log.WithField("hostname", hostname).Infof("Signature of host key for: %s key: %s type: %s", hostname, FingerprintSHA512(cert.SignatureKey), cert.Type())
 	return cert.Marshal(), &end, nil
 }
 
